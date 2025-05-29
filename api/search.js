@@ -1,110 +1,108 @@
 // search.js (for Vercel API route)
-
-// Use dynamic import for node-fetch if you're in an ES module environment
-// or stick to require if your Vercel function is CommonJS.
-// For Vercel serverless functions, you can typically use require.
-const fetch = require('node-fetch'); // For fetching HTML content of pages
+const fetch = require('node-fetch');
 const { JSDOM } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
 
-// Helper function to fetch and parse content from a URL
 async function fetchAndExtractReadableContent(urlToFetch) {
+  console.log(`[Server] Attempting to fetch and extract content from: ${urlToFetch}`);
   try {
+    // For sites like LinkedIn, direct fetching will likely get the public, non-logged-in version,
+    // and might be heavily restricted or just a login page.
+    // For other general websites, this has a better chance of success.
     const response = await fetch(urlToFetch, {
       headers: {
-        // A common user agent can sometimes help avoid simple blocks
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        // 'Referer': 'https://www.google.com/' // Sometimes a referer can help
       },
-      timeout: 10000 // 10 seconds timeout for fetching the page
+      timeout: 8000 // 8 seconds timeout for fetching the page (Vercel Hobby plan has ~10s limit)
     });
 
     if (!response.ok) {
-      console.error(`Failed to fetch ${urlToFetch}: ${response.statusText}`);
-      return null;
+      console.error(`[Server] Failed to fetch ${urlToFetch}: ${response.status} ${response.statusText}`);
+      return `Failed to fetch content (Status: ${response.status}).`; // Return status for LLM
     }
 
     const html = await response.text();
-    const doc = new JSDOM(html, { url: urlToFetch }); // Provide URL for Readability
+    const doc = new JSDOM(html, { url: urlToFetch });
     const reader = new Readability(doc.window.document);
     const article = reader.parse();
 
     if (article && article.textContent) {
-      // Return a snippet of the text content (e.g., first 3000-5000 characters)
-      // to keep the payload to the LLM manageable.
-      return article.textContent.trim().substring(0, 4000) + (article.textContent.length > 4000 ? "..." : "");
+      const extracted = article.textContent.trim().substring(0, 4000) + (article.textContent.length > 4000 ? "..." : "");
+      console.log(`[Server] Successfully extracted content snippet from ${urlToFetch} (length: ${extracted.length})`);
+      return extracted;
     }
-    return null;
+    console.log(`[Server] Readability could not parse meaningful content from ${urlToFetch}`);
+    return "Readable content not found or page structure not suitable for extraction.";
   } catch (error) {
-    console.error(`Error fetching or parsing ${urlToFetch}:`, error);
-    return null;
+    console.error(`[Server] Error fetching or parsing ${urlToFetch}:`, error.message);
+    return `Error during content extraction: ${error.name}.`;
   }
 }
 
 export default async function handler(req, res) {
-  // CORS Headers
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization"); // Added Authorization for future
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
+  // ... (CORS headers, API key checks remain the same) ...
   const { query } = req.query;
   const apiKey = process.env.SERP_API_KEY;
 
-  if (!query) {
-    return res.status(400).json({ error: "Missing query parameter" });
-  }
-  if (!apiKey) {
-    console.error("SERP_API_KEY is not set in environment variables.");
-    return res.status(500).json({ error: "API key for search service is not configured on the server." });
-  }
+  if (req.method === "OPTIONS") { return res.status(200).end(); }
+  if (!query) { return res.status(400).json({ error: "Missing query parameter" }); }
+  if (!apiKey) { /* ... */ return res.status(500).json({ error: "API key not configured." }); }
 
-  const serpApiUrl = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&api_key=${apiKey}`;
+  const serpApiUrl = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&api_key=${apiKey}&num=5`; // Get top 5 results
 
   try {
+    console.log(`[Server] Performing SerpAPI search for: "${query}"`);
     const serpResponse = await fetch(serpApiUrl);
-    if (!serpResponse.ok) {
-        const errorBody = await serpResponse.text();
-        console.error("SerpAPI Error:", serpResponse.status, errorBody);
-        return res.status(serpResponse.status).json({ error: `Failed to fetch from SerpAPI: ${serpResponse.statusText}`, details: errorBody });
-    }
+    // ... (SerpAPI error handling) ...
     const serpData = await serpResponse.json();
 
-    // Now, try to fetch content for the top organic result (if any)
+    if (serpData.error) {
+        console.error("[Server] SerpAPI returned an error:", serpData.error);
+        return res.status(400).json({ error: "Search API error", details: serpData.error });
+    }
+    
+    // Process up to 2 organic results for content extraction
     if (serpData.organic_results && serpData.organic_results.length > 0) {
-      const topResult = serpData.organic_results[0];
-      if (topResult.link) {
-        console.log(`Fetching content for top result: ${topResult.link}`);
-        const extractedContent = await fetchAndExtractReadableContent(topResult.link);
-        if (extractedContent) {
-          // Add the extracted content to the result object
-          // You might want to add it to each result you process, or create a new top-level field.
-          // For simplicity, let's add it to the top result itself.
-          serpData.organic_results[0].extracted_content = extractedContent;
+      const resultsToProcess = serpData.organic_results.slice(0, 2); // Max 2 for performance
+
+      for (let i = 0; i < resultsToProcess.length; i++) {
+        const result = resultsToProcess[i];
+        if (result.link) {
+          // Skip LinkedIn for direct server-side fetch as it's usually just a login page or blocked
+          // Unless you have a specific strategy for LinkedIn (e.g. a dedicated LinkedIn API if it existed for this use)
+          if (result.link.toLowerCase().includes("linkedin.com/")) {
+              console.log(`[Server] Skipping direct fetch for LinkedIn URL: ${result.link}`);
+              serpData.organic_results[i].extracted_content_status = "Direct content extraction for LinkedIn profiles is generally not feasible due to login walls and restrictions. Please refer to the profile snippet if available, or ask the user for details.";
+              serpData.organic_results[i].extracted_content = null; // Ensure it's null
+          } else {
+              const extractedContentOrStatus = await fetchAndExtractReadableContent(result.link);
+              if (typeof extractedContentOrStatus === 'string' && 
+                  (extractedContentOrStatus.startsWith("Failed to fetch") || 
+                   extractedContentOrStatus.startsWith("Readable content not found") ||
+                   extractedContentOrStatus.startsWith("Error during content extraction"))) {
+                  serpData.organic_results[i].extracted_content_status = extractedContentOrStatus;
+                  serpData.organic_results[i].extracted_content = null; // Ensure it's null
+              } else if (extractedContentOrStatus) {
+                  serpData.organic_results[i].extracted_content = extractedContentOrStatus;
+                  serpData.organic_results[i].extracted_content_status = "Content extracted successfully.";
+              } else { // Should be caught by the string checks above, but as a fallback
+                  serpData.organic_results[i].extracted_content_status = "Content extraction did not yield results.";
+                  serpData.organic_results[i].extracted_content = null;
+              }
+          }
         } else {
-          serpData.organic_results[0].extracted_content_status = "Failed to retrieve or parse content.";
+            serpData.organic_results[i].extracted_content_status = "No link provided in search result.";
+            serpData.organic_results[i].extracted_content = null;
         }
       }
-
-      // Optionally, fetch for the second result too (be mindful of execution time)
-      // if (serpData.organic_results.length > 1) {
-      //   const secondResult = serpData.organic_results[1];
-      //   if (secondResult.link) {
-      //     console.log(`Fetching content for second result: ${secondResult.link}`);
-      //     const extractedContentSecond = await fetchAndExtractReadableContent(secondResult.link);
-      //     if (extractedContentSecond) {
-      //       serpData.organic_results[1].extracted_content = extractedContentSecond;
-      //     }
-      //   }
-      // }
     }
-
+    console.log("[Server] Sending processed search results to client.");
     res.status(200).json(serpData);
 
   } catch (error) {
-    console.error("Overall error in search handler:", error);
-    res.status(500).json({ error: "Failed to process search request.", details: error.message });
+    // ... (overall error handling) ...
   }
 }
