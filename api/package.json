@@ -1,0 +1,10 @@
+
+{
+  
+  "dependencies": {
+    "node-fetch": "^2.6.7", 
+    "jsdom": "^22.1.0",
+    "@mozilla/readability": "^0.5.0" 
+    
+  }
+}
