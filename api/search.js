@@ -82,7 +82,7 @@ export default async function handler(req, res) {
         console.error("[Server Backend] SERP_API_KEY missing for SerpAPI search.");
         return res.status(500).json({ error: "Search API key not configured." });
       }
-      const serpApiUrl = `https://serpapi.com/search.json?q=${encodeURIComponent(queryOrUrl)}&api_key=${apiKey}&num=5`; // num=5 to get a few results
+      const serpApiUrl = `https://api.search.brave.com/res/v1/web/search.json?q=${encodeURIComponent(queryOrUrl)}&api_key=${apiKey}&num=5`; // num=5 to get a few results
       console.log(`[Server Backend] SerpAPI search for: "${queryOrUrl}"`);
       const serpResponse = await fetch(serpApiUrl);
 
